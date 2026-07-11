@@ -9,6 +9,16 @@ import { findCompetitors } from './research/competitor-finder';
 import { findBusinessRelations } from './research/business-relations-finder';
 import { queryWikidata } from './research/wikidata-adapter';
 import { queryGleif } from './research/gleif-adapter';
+import { getResearchConfig } from './research/research-config';
+import { extractEntitySeeds, seedsSummary } from './research/entity-seed-extractor';
+import { scoreCoverage } from './research/data-coverage-scorer';
+import { routeSources } from './research/source-router';
+import { generateFollowUpQueries } from './research/follow-up-query-generator';
+import { runFollowUpSearch } from './research/search-providers';
+import { discoverPublicFiles } from './research/public-file-discovery';
+import { queryWayback } from './research/wayback-adapter';
+import { querySecEdgar } from './research/sec-edgar-adapter';
+import { queryOpenAlex } from './research/openalex-adapter';
 import { harvestContacts } from './research/contact-harvester';
 import { resolveOfficialDomain } from './research/domain-resolver';
 import { dedupeEvidence } from './research/evidence-deduper';
@@ -231,6 +241,86 @@ export async function runResearchJob(
     console.log('[research] rdap dns evidence', rdapDns.evidence.length);
     Object.assign(serviceErrors, rdapDns.errors);
 
+    // ── RECURSIVE DISCOVERY (round 1) ────────────────────────────────────
+    // Mine expansion seeds from what round 0 found, score coverage, and if
+    // coverage is weak run a targeted follow-up search round whose queries
+    // pivot on the seeds (legal name, handles, products) + missing fields.
+    const config = getResearchConfig();
+    const round0Evidence: EvidenceItem[] = [
+      ...serpEvidence,
+      ...domainResolution.evidence,
+      ...contactEvidence,
+      ...socialDiscovery.evidence,
+      ...metadataEvidence,
+      ...techEvidence,
+      ...pdfEvidence,
+      ...rdapDns.evidence,
+    ];
+    const seeds = extractEntitySeeds(searchName, round0Evidence, pages);
+    const coverage = scoreCoverage(round0Evidence);
+    console.log('[research] coverage after round 0', coverage.coverageScore, 'missing:', coverage.missingCriticalFields.join(','));
+    const sourcePlan = routeSources({
+      companyName: searchName,
+      seeds,
+      coverage,
+      evidence: round0Evidence,
+      pages,
+      selectedDomain: domainResolution.selectedDomain ?? undefined,
+    });
+
+    const discoveryRounds: NonNullable<ResearchDebug['discoveryRounds']> = [
+      {
+        round: 0,
+        queriesRun: searchOutput.queriesRun,
+        searchResults: serpResults.length,
+        evidenceFound: round0Evidence.length,
+        newSeeds: seedsSummary(seeds),
+      },
+    ];
+
+    if (coverage.coverageScore < config.coverageStopThreshold) {
+      const followQueries = generateFollowUpQueries(searchName, seeds, coverage, sourcePlan);
+      if (followQueries.length > 0) {
+        const followOut = await runFollowUpSearch(followQueries, config.maxFollowUpQueries);
+        if (followOut.errors.length > 0) {
+          serviceErrors.follow_up_search = followOut.errors.join('\n').slice(0, 1200);
+        }
+        serpResults = dedupeSerp([...serpResults, ...followOut.results]);
+        serpEvidence = mineSerpResults(serpResults);
+        console.log('[research] follow-up search results', followOut.results.length);
+        console.log('[research] serp evidence after round 1', serpEvidence.length);
+        discoveryRounds.push({
+          round: 1,
+          queriesRun: followOut.queriesRun,
+          searchResults: followOut.results.length,
+          evidenceFound: serpEvidence.length,
+        });
+      }
+    } else {
+      console.log('[research] coverage strong, skipping follow-up round');
+    }
+
+    // Routed free sources (public files / Wayback / SEC EDGAR / OpenAlex)
+    const [publicFiles, wayback, edgar, openalex] = await Promise.all([
+      sourcePlan.sources.includes('public_files') && domainResolution.selectedDomain
+        ? discoverPublicFiles(domainResolution.selectedDomain).catch((err) => ({ evidence: [] as EvidenceItem[], errors: { public_files: String(err) } }))
+        : Promise.resolve({ evidence: [] as EvidenceItem[], errors: {} as Record<string, string> }),
+      sourcePlan.sources.includes('wayback') && domainResolution.selectedDomain
+        ? queryWayback(domainResolution.selectedDomain).catch((err) => ({ evidence: [] as EvidenceItem[], errors: { wayback: String(err) } }))
+        : Promise.resolve({ evidence: [] as EvidenceItem[], errors: {} as Record<string, string> }),
+      sourcePlan.sources.includes('sec_edgar')
+        ? querySecEdgar(searchName).catch((err) => ({ evidence: [] as EvidenceItem[], errors: { sec_edgar: String(err) } }))
+        : Promise.resolve({ evidence: [] as EvidenceItem[], errors: {} as Record<string, string> }),
+      sourcePlan.sources.includes('openalex')
+        ? queryOpenAlex(searchName).catch((err) => ({ evidence: [] as EvidenceItem[], errors: { openalex: String(err) } }))
+        : Promise.resolve({ evidence: [] as EvidenceItem[], errors: {} as Record<string, string> }),
+    ]);
+    console.log('[research] public-file evidence', publicFiles.evidence.length);
+    console.log('[research] wayback evidence', wayback.evidence.length);
+    console.log('[research] sec edgar evidence', edgar.evidence.length);
+    console.log('[research] openalex evidence', openalex.evidence.length);
+    Object.assign(serviceErrors, publicFiles.errors, wayback.errors, edgar.errors, openalex.errors);
+
     const peopleEvidence = findPeople(searchName, serpResults, pages);
     console.log('[research] people evidence', peopleEvidence.length);
     const historyEvidence = await buildHistoryTimeline(searchName, pages, serpResults, pdfEvidence);
@@ -275,6 +365,10 @@ export async function runResearchJob(
       ...relationEvidence,
       ...wikidataEvidence,
       ...gleifEvidence,
+      ...publicFiles.evidence,
+      ...wayback.evidence,
+      ...edgar.evidence,
+      ...openalex.evidence,
     ];
     console.log('[research] total evidence before scoring', rawEvidence.length);
 
@@ -299,7 +393,16 @@ export async function runResearchJob(
             }
           })();
           if (host.endsWith(selDomain)) return true;
-          // LinkedIn /in or any SERP person whose title/snippet names the company
+          // Data-broker directories list people of AMBIGUOUS same-named
+          // entities — never trust them for person attribution.
+          if (/datanyze|zoominfo|apollo\.io|rocketreach|leadiq|signalhire|lusha|contactout|theorg\.com/i.test(host)) {
+            return false;
+          }
+          // Same-name TWIN domain (bioadvance.com when the real company is
+          // bioadvancelatam.com): its team pages describe a different company.
+          const hostRoot = host.split('.').slice(0, -1).join('.');
+          if (brandTokens.some((t) => hostRoot.includes(t)) && !host.endsWith(selDomain)) return false;
+          // Otherwise require the snippet/title to actually name the company
           const hay = `${e.sourceTitle ?? ''} ${e.evidenceText ?? ''}`.toLowerCase();
           return brandTokens.some((t) => hay.includes(t));
         })
@@ -338,7 +441,7 @@ export async function runResearchJob(
     // Explains", "Executive Director") — a real person is 2-3 capitalized name
     // words, none of which is a company/role/topic word or a company brand token.
     const NON_NAME_WORD =
-      /\b(Corporate|Spend|Wikipedia|Explains?|Business|Executive|Director|Manager|Officer|President|Founder|Solutions|Platform|Company|Review|News|Overview|Profile|About|Board|Team|Group|Capital|Sciences|Inc|LLC|Ltd|Corp|The|And|For|With|How|Why|What|Best|Top)\b/i;
+      /\b(Corporate|Spend|Wikipedia|Explains?|Business|Executive|Director|Manager|Officer|President|Founder|Solutions|Platform|Company|Review|News|Overview|Profile|About|Board|Team|Group|Capital|Sciences|Inc|LLC|Ltd|Corp|The|And|For|With|How|Why|What|Best|Top|Employees?|List|Greater|Global|International|Regional|Philadelphia|Medical|Devices?)\b/i;
     finalReport.key_people = finalReport.key_people.filter((p) => {
       const words = p.name.trim().split(/\s+/);
       if (words.length < 2 || words.length > 3) return false;
@@ -380,6 +483,11 @@ export async function runResearchJob(
         people_finder: 'success',
         history_news: 'success',
         competitor_finder: 'success',
+        public_files: sourcePlan.sources.includes('public_files') ? serviceStatus(publicFiles.errors) : 'skipped',
+        wayback: sourcePlan.sources.includes('wayback') ? serviceStatus(wayback.errors) : 'skipped',
+        sec_edgar: sourcePlan.sources.includes('sec_edgar') ? serviceStatus(edgar.errors) : 'skipped',
+        openalex: sourcePlan.sources.includes('openalex') ? serviceStatus(openalex.errors) : 'skipped',
+        follow_up_search: discoveryRounds.length > 1 ? 'success' : 'skipped',
         llm_reconciliation: llm.output ? 'success' : 'failed',
       },
       serviceErrors,
@@ -410,6 +518,31 @@ export async function runResearchJob(
       warnings,
       pages,
     });
+    // Recursive-discovery telemetry: explains WHY a report has more/less data
+    debug.coverageScore = coverage.coverageScore;
+    debug.missingCriticalFields = coverage.missingCriticalFields;
+    debug.recommendedNextActions = coverage.recommendedNextActions;
+    debug.discoveryRounds = discoveryRounds;
+    debug.sourceRouter = { sourcesSelected: sourcePlan.selected, sourcesSkipped: sourcePlan.skipped };
+    debug.moduleCounts = {
+      serpEvidence: serpEvidence.length,
+      contactEvidence: contactEvidence.length,
+      socialEvidence: socialDiscovery.evidence.length,
+      metadataEvidence: metadataEvidence.length,
+      techEvidence: techEvidence.length,
+      pdfEvidence: pdfEvidence.length,
+      rdapDnsEvidence: rdapDns.evidence.length,
+      peopleEvidence: peopleEvidence.length,
+      historyEvidence: historyEvidence.length,
+      competitorEvidence: competitorEvidence.length,
+      relationEvidence: relationEvidence.length,
+      wikidataEvidence: wikidataEvidence.length,
+      gleifEvidence: gleifEvidence.length,
+      publicFilesEvidence: publicFiles.evidence.length,
+      waybackEvidence: wayback.evidence.length,
+      secEdgarEvidence: edgar.evidence.length,
+      openalexEvidence: openalex.evidence.length,
+    };
 
     if (deduped.length < 5) {
       await updateJob(jobId, {

@@ -280,3 +280,30 @@ export async function runSearchProviders(
   );
   return { results: deduped, queriesRun, providerUsed: companyName ? 'groq-compound+duckduckgo' : 'duckduckgo', errors };
 }
+
+/**
+ * Round-2 discovery search: runs arbitrary follow-up queries (quoted seeds,
+ * registry/review/careers packs) through the paid provider if configured,
+ * else DuckDuckGo with long pacing. Unlike the initial round, no site:/
+ * filetype: filter — these queries were already hand-picked by the follow-up
+ * generator against a budget.
+ */
+export async function runFollowUpSearch(
+  queries: GeneratedQuery[],
+  maxQueries: number,
+): Promise<SearchRunOutput> {
+  const toRun = queries.slice(0, maxQueries);
+  const primary = [googleCse, serper].find((p) => p.available());
+  const provider = primary ?? duckduckgo;
+  const out = await runOneProvider(provider, toRun, primary ? 0 : 1_500);
+  logger.info(
+    { provider: provider.name, queries: out.queriesRun.length, results: out.results.length },
+    'follow-up search complete',
+  );
+  return {
+    results: dedupeResults(out.results),
+    queriesRun: out.queriesRun,
+    providerUsed: provider.name,
+    errors: out.errors,
+  };
+}

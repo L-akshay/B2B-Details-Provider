@@ -18,6 +18,9 @@ const SOURCE_FLOOR: Record<SourceType, number> = {
   third_party_directory: 0.5,
   public_registry: 0.9,
   firecrawl: 0.85,
+  wayback: 0.55,
+  openalex: 0.7,
+  sec_edgar: 0.9,
   llm: 0.4,
   manual_fallback: 0.3,
 };
@@ -36,6 +39,8 @@ export function scoreEvidence(items: EvidenceItem[]): EvidenceItem[] {
 
     if (item.sourceType === 'llm') confidence = Math.min(confidence, LLM_CAP);
     if (item.metadata?.derived === true) confidence = Math.min(confidence, 0.6);
+    // Archived evidence describes the PAST — never present it as current fact.
+    if (item.metadata?.archived === true) confidence = Math.min(confidence, 0.6);
     if (item.verified === 'low_confidence') confidence = Math.min(confidence, item.confidence);
 
     confidence = Math.max(0, Math.min(0.98, confidence));

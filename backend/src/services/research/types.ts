@@ -64,6 +64,9 @@ export type SourceType =
   | 'llm'
   | 'third_party_directory'
   | 'public_registry'
+  | 'wayback'
+  | 'openalex'
+  | 'sec_edgar'
   | 'manual_fallback';
 
 export type ExtractedBy =
@@ -158,6 +161,22 @@ export type ResearchDebug = {
   fieldsFilteredDueToConfidence: string[];
   fieldsIgnoredDueToSchemaMismatch: string[];
   warnings: string[];
+  /** Recursive-discovery telemetry (round 2+, coverage, source routing). */
+  coverageScore?: number;
+  missingCriticalFields?: string[];
+  recommendedNextActions?: string[];
+  discoveryRounds?: Array<{
+    round: number;
+    queriesRun: string[];
+    searchResults: number;
+    evidenceFound: number;
+    newSeeds?: Record<string, string[]>;
+  }>;
+  sourceRouter?: {
+    sourcesSelected: Array<{ source: string; reason: string }>;
+    sourcesSkipped: Array<{ source: string; reason: string }>;
+  };
+  moduleCounts?: Record<string, number>;
 };
 
 /** A single search engine result, provider-agnostic. */
