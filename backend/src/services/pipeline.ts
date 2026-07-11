@@ -3,7 +3,7 @@ import { updateJob } from '../lib/jobs';
 import { logger } from '../lib/logger';
 import { normalizeDomain } from '../lib/serviceResult';
 import type { CompanyReport } from '../types/schema';
-import { generateAndUploadDocx } from './docGenerator';
+import { generateAndUploadPdf } from './docGenerator';
 import { buildDebugReport } from './research/debug-builder';
 import { findCompetitors } from './research/competitor-finder';
 import { findBusinessRelations } from './research/business-relations-finder';
@@ -388,7 +388,7 @@ export async function runResearchJob(
     }
 
     const reportWithDebug: ReportWithDebug = { ...finalReport, debug_json: debug };
-    const docxUrl = await generateAndUploadDocx(jobId, reportWithDebug, deduped, debug);
+    const docxUrl = await generateAndUploadPdf(jobId, reportWithDebug, deduped, debug);
 
     await updateJob(jobId, {
       status: 'done',
