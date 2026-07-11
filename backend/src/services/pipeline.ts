@@ -288,6 +288,9 @@ export async function runResearchJob(
     const anchoredEvidence = selDomain
       ? rawEvidence.filter((e) => {
           if (e.field !== 'key_person') return true;
+          // Trusted structured databases resolve the entity themselves — keep
+          // their people (founder/CEO from Wikidata/GLEIF) regardless of host.
+          if (e.sourceType === 'wikidata' || e.sourceType === 'gleif') return true;
           const host = (() => {
             try {
               return new URL(e.sourceUrl).hostname.replace(/^www\./, '');
@@ -296,9 +299,9 @@ export async function runResearchJob(
             }
           })();
           if (host.endsWith(selDomain)) return true;
-          const li = typeof e.metadata?.linkedinProfile === 'string' ? e.metadata.linkedinProfile : '';
+          // LinkedIn /in or any SERP person whose title/snippet names the company
           const hay = `${e.sourceTitle ?? ''} ${e.evidenceText ?? ''}`.toLowerCase();
-          return Boolean(li) && brandTokens.some((t) => hay.includes(t));
+          return brandTokens.some((t) => hay.includes(t));
         })
       : rawEvidence;
     const droppedPeople = rawEvidence.length - anchoredEvidence.length;
@@ -318,6 +321,37 @@ export async function runResearchJob(
     if (llm.error) serviceErrors.llm_reconciliation = llm.error.slice(0, 800);
     console.log('[research] llm reconciliation', llm.output ? 'applied' : 'skipped');
     const finalReport = assembleFinalReport(deterministicDraft, llm.output);
+    // Merge AI-extracted people (named on the company's own pages / in news)
+    // with the script-found LinkedIn people, deduped by name. These are
+    // grounded in the crawled sources, sourced to the official website.
+    if (llm.people.length > 0) {
+      const existing = new Set(finalReport.key_people.map((p) => p.name.toLowerCase()));
+      const websiteSrc = finalReport.website || (domainResolution.selectedDomain ? `https://${domainResolution.selectedDomain}` : '');
+      for (const person of llm.people) {
+        if (existing.has(person.name.toLowerCase())) continue;
+        existing.add(person.name.toLowerCase());
+        finalReport.key_people.push({ name: person.name, role: person.role, source_url: websiteSrc });
+      }
+    }
+    // Final people cleanup: drop non-name phrases that leak from SERP snippet
+    // parsing ("Corporate Spend", "Wikipedia Ramp Business", "Eric Glyman
+    // Explains", "Executive Director") — a real person is 2-3 capitalized name
+    // words, none of which is a company/role/topic word or a company brand token.
+    const NON_NAME_WORD =
+      /\b(Corporate|Spend|Wikipedia|Explains?|Business|Executive|Director|Manager|Officer|President|Founder|Solutions|Platform|Company|Review|News|Overview|Profile|About|Board|Team|Group|Capital|Sciences|Inc|LLC|Ltd|Corp|The|And|For|With|How|Why|What|Best|Top)\b/i;
+    finalReport.key_people = finalReport.key_people.filter((p) => {
+      const words = p.name.trim().split(/\s+/);
+      if (words.length < 2 || words.length > 3) return false;
+      if (NON_NAME_WORD.test(p.name)) return false;
+      if (brandTokens.some((t) => p.name.toLowerCase().includes(t))) return false;
+      return words.every((w) => /^[A-ZÁÉÍÓÚÑ][a-záéíóúñ'.-]+$/.test(w));
+    });
+    if (finalReport.key_people.length > 0) {
+      finalReport.not_found = finalReport.not_found.filter((f) => f !== 'key_people');
+    } else if (!finalReport.not_found.includes('key_people')) {
+      finalReport.not_found.push('key_people');
+    }
+    console.log('[research] key people', finalReport.key_people.length);
     console.log('[research] final filled fields', finalFilledFieldCount(finalReport));
 
     await updateJob(jobId, { stage: 'generating_report' });

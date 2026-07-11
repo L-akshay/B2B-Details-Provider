@@ -117,8 +117,35 @@ Return ONLY a JSON object with exactly these keys:
   "suppliers": ["companies/brands that supply this company, if named"],
   "buyers": ["named buyer/customer types or organizations"],
   "distributors": ["named distributors/dealers/resellers"],
-  "office_locations": ["all cities/offices/facilities mentioned"]
-}`;
+  "office_locations": ["all cities/offices/facilities mentioned"],
+  "key_people": [{"name": "Full Name", "role": "their title/role"}]
+}
+
+For "key_people": include ONLY real named individuals who explicitly appear in the provided sources as being associated with THIS company (founders, executives, directors, managers, spokespeople quoted in news, team members). Copy names exactly. If a person's role isn't stated, use "". NEVER invent or guess a person — if no individuals are named in the sources, return [].`;
+
+interface ExtractedPerson {
+  name: string;
+  role: string;
+}
+
+function sanitizePeople(raw: unknown): ExtractedPerson[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: ExtractedPerson[] = [];
+  for (const p of raw) {
+    if (!p || typeof p !== 'object') continue;
+    const name = String((p as { name?: unknown }).name ?? '').trim();
+    const role = String((p as { role?: unknown }).role ?? '').trim();
+    // must look like a real person name (2-4 capitalized words), not a slogan
+    if (!/^[A-ZÁÉÍÓÚÑ][\wáéíóúñ'.-]+(?:\s+[A-ZÁÉÍÓÚÑ.][\wáéíóúñ'.-]*){1,3}$/.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, role: role.slice(0, 80) });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
 
 function sanitize(raw: Partial<Record<string, unknown>>): Partial<CompanyReport> {
   // Generous caps — the point of this pass is DEPTH.
@@ -149,7 +176,7 @@ export async function reconcileWithLLM(
   evidence: MergedEvidence[],
   selectedDomain?: string,
   pages: CrawledPage[] = [],
-): Promise<{ output: Partial<CompanyReport> | null; error?: string }> {
+): Promise<{ output: Partial<CompanyReport> | null; people: ExtractedPerson[]; error?: string }> {
   const anchor = selectedDomain
     ? `\n\nThe official company is the one operating the website ${selectedDomain}. If any content clearly describes a DIFFERENT company that merely shares the name, ignore it.`
     : '';
@@ -167,7 +194,8 @@ export async function reconcileWithLLM(
       temperature: 0.1,
       timeoutMs: 120_000,
     });
-    return { output: sanitize(parseJsonLenient(text)) };
+    const parsed = parseJsonLenient(text);
+    return { output: sanitize(parsed as Partial<Record<string, unknown>>), people: sanitizePeople((parsed as { key_people?: unknown }).key_people) };
   } catch (geminiErr) {
     logger.warn({ err: String(geminiErr) }, 'gemini reconciler failed, trying groq llama');
     try {
@@ -179,9 +207,10 @@ export async function reconcileWithLLM(
         maxTokens: 4_000,
         jsonObject: true,
       });
-      return { output: sanitize(parseJsonLenient(text)) };
+      const parsed = parseJsonLenient(text);
+      return { output: sanitize(parsed as Partial<Record<string, unknown>>), people: sanitizePeople((parsed as { key_people?: unknown }).key_people) };
     } catch (groqErr) {
-      return { output: null, error: `gemini: ${String(geminiErr)}; groq: ${String(groqErr)}` };
+      return { output: null, people: [], error: `gemini: ${String(geminiErr)}; groq: ${String(groqErr)}` };
     }
   }
 }
