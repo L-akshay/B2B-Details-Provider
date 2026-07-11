@@ -19,7 +19,7 @@ export type UrlClass =
   | 'unknown';
 
 const DIRECTORY_HOSTS =
-  /crunchbase|zoominfo|dnb\.com|opencorporates|kompass|europages|yelp|yellowpages|paginasamarillas|clutch\.co|glassdoor|indeed|apollo\.io|rocketreach|lusha|signalhire|cylex|infobel|empresite/i;
+  /crunchbase|zoominfo|dnb\.com|opencorporates|kompass|europages|yelp|yellowpages|paginasamarillas|clutch\.co|glassdoor|indeed|apollo\.io|rocketreach|lusha|signalhire|cylex|infobel|empresite|veritrade|importkey|tradeatlas|seair\.co|cosmos\.com\.mx|marketinsidedata|importgenius|panjiva|volza|importyeti|datamexico|indiamart|justdial|tofler|zaubacorp/i;
 const NEWS_HOSTS =
   /news\.google|reuters|bloomberg|forbes|techcrunch|prnewswire|businesswire|eleconomista|elfinanciero|expansion\.mx|milenio|infobae|entrepreneur|marketwatch/i;
 const REGISTRY_HOSTS = /gleif|sec\.gov|gob\.mx|companieshouse|registro|boletin|dof\.gob/i;
@@ -211,17 +211,39 @@ export function mineSerpResults(results: SerpResult[]): EvidenceItem[] {
     }
 
     if (urlClass === 'directory' || urlClass === 'registry') {
+      // Surface the profile LINK itself — for companies without a website
+      // these directory/trade-data profiles are the only public trail, and
+      // the report should hand the user somewhere to click.
       evidence.push(
         makeEvidence({
           ...base,
-          field: 'unknown',
-          value: result.snippet ?? result.title,
+          field: 'source_url',
+          value: result.url,
           sourceType: urlClass === 'registry' ? 'public_registry' : 'third_party_directory',
           extractedBy: 'serp',
-          confidence: urlClass === 'registry' ? 0.6 : 0.45,
-          metadata: { urlClass },
+          confidence: urlClass === 'registry' ? 0.6 : 0.5,
+          evidenceText: (result.snippet ?? result.title).slice(0, 200),
+          metadata: { urlClass, profileFor: result.title.slice(0, 80) },
         }),
       );
+
+      // Mexican RFC (tax ID) often appears verbatim in trade-data URLs and
+      // snippets, e.g. veritradecorp.com/.../rfc-vic090710iu3
+      const rfcHaystack = `${result.url} ${result.title} ${result.snippet ?? ''}`;
+      const rfcMatch = rfcHaystack.match(/rfc[-_/:\s]*([a-zñ&]{3,4}\d{6}[a-z0-9]{3})\b/i);
+      if (rfcMatch?.[1]) {
+        evidence.push(
+          makeEvidence({
+            ...base,
+            field: 'tax_id',
+            value: `RFC ${rfcMatch[1].toUpperCase()}`,
+            sourceType: urlClass === 'registry' ? 'public_registry' : 'third_party_directory',
+            extractedBy: 'regex',
+            confidence: 0.7,
+            evidenceText: `RFC found in ${urlClass} result: ${result.url.slice(0, 120)}`,
+          }),
+        );
+      }
     }
   }
 
