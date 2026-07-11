@@ -273,6 +273,35 @@ function buildReportPdf(report: EvidenceAwareReport, evidence: MergedEvidence[] 
     for (const item of pdfs) pdf.bullet(item.value, { link: item.value, meta: metaFor(item) });
   } else pdf.paragraph(NOT_AVAILABLE);
 
+  // Public profiles, directory listings, registry & archived pages — the
+  // clickable trail. Vital for companies with no website of their own: their
+  // trade-data / directory / archive profiles are the only public sources.
+  pdf.heading('Public Profiles & Source Pages');
+  const seenLinks = new Set<string>();
+  const sourceLinks = evidence
+    .filter((item) => item.field === 'source_url' && /^https?:\/\//.test(item.value))
+    .filter((item) => {
+      const key = item.value.replace(/\/$/, '').toLowerCase();
+      if (seenLinks.has(key)) return false;
+      seenLinks.add(key);
+      return true;
+    });
+  if (sourceLinks.length > 0) {
+    for (const item of sourceLinks.slice(0, 25)) {
+      const archived = item.metadata?.archived === true;
+      const kind = archived ? 'archived' : (item.metadata?.urlClass as string) ?? item.sourceType;
+      let host = '';
+      try {
+        host = new URL(item.value).hostname.replace(/^www\./, '');
+      } catch {
+        host = item.value;
+      }
+      pdf.bullet(`${host} — ${item.sourceTitle ?? kind}`, { link: item.value, meta: `(${kind})` });
+    }
+  } else {
+    pdf.paragraph(NOT_AVAILABLE);
+  }
+
   const lowConfidence = report.low_confidence_evidence ?? [];
   if (lowConfidence.length > 0) {
     pdf.heading('Found but Unverified');

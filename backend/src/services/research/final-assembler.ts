@@ -268,6 +268,8 @@ export function assembleDeterministicReport(
 
   report.low_confidence_evidence = evidence
     .filter((item) => item.confidence >= UNVERIFIED_THRESHOLD && item.confidence < VERIFIED_THRESHOLD)
+    // source_url + pdf links have their own dedicated report sections
+    .filter((item) => item.field !== 'source_url' && item.field !== 'pdf_document')
     .map((item) => ({
       field: item.field,
       value: item.value,
