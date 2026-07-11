@@ -324,6 +324,24 @@ export function assembleFinalReport(
       (out as unknown as Record<string, unknown>)[key] = next;
     }
   };
+  // For detail lists, UNION the script-found values with the AI-extracted ones
+  // (deduped, case-insensitive) so the report is as complete as possible —
+  // deterministic items keep their source URLs; AI adds what pages revealed.
+  const mergeArray = (key: keyof CompanyReport, cap = 40) => {
+    const current = Array.isArray(deterministic[key]) ? (deterministic[key] as string[]) : [];
+    const next = Array.isArray(llmOutput[key]) ? (llmOutput[key] as string[]) : [];
+    if (next.length === 0) return;
+    const seen = new Set(current.map((v) => v.trim().toLowerCase()));
+    const merged = [...current];
+    for (const v of next) {
+      const norm = typeof v === 'string' ? v.trim() : '';
+      if (norm && !seen.has(norm.toLowerCase())) {
+        seen.add(norm.toLowerCase());
+        merged.push(norm);
+      }
+    }
+    (out as unknown as Record<string, unknown>)[key] = merged.slice(0, cap);
+  };
 
   for (const key of ['overview', 'description', 'business_model', 'target_customers', 'industry'] as const) {
     overwriteString(key);
@@ -336,12 +354,12 @@ export function assembleFinalReport(
     'suppliers',
     'buyers',
     'distributors',
-    'awards',
     'office_locations',
-    'history',
   ] as const) {
-    fillArray(key);
+    mergeArray(key);
   }
+  // awards/history: keep fill-if-empty (deterministic has structured data)
+  for (const key of ['awards', 'history'] as const) fillArray(key);
 
   // Recompute not_found AFTER the LLM merge so a field the AI just filled can
   // never appear in "Not publicly available" (acceptance criterion).

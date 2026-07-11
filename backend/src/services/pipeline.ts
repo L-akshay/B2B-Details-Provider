@@ -314,7 +314,7 @@ export async function runResearchJob(
     const deterministicDraft = assembleDeterministicReport(companyName, deduped);
     // AI runs LAST and write-only: it composes narrative fields from the
     // script-collected evidence and can never overwrite deterministic facts.
-    const llm = await reconcileWithLLM(searchName, deduped, domainResolution.selectedDomain ?? undefined);
+    const llm = await reconcileWithLLM(searchName, deduped, domainResolution.selectedDomain ?? undefined, pages);
     if (llm.error) serviceErrors.llm_reconciliation = llm.error.slice(0, 800);
     console.log('[research] llm reconciliation', llm.output ? 'applied' : 'skipped');
     const finalReport = assembleFinalReport(deterministicDraft, llm.output);
