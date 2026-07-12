@@ -3,6 +3,30 @@ import { makeEvidence, type CrawledPage, type EvidenceItem, type SourceType } fr
 
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 const MAILTO_RE = /mailto:([^"'?\s>]+)/gi;
+
+// Sites hide addresses from naive scrapers as "info [at] company dot com",
+// "ventas (arroba) company punto mx", or "info @ company . com". These are
+// still PUBLIC — the human-readable page shows them — so reconstruct them.
+// "at" tokens: @, or (at)/[at]/{at}/at/arroba with optional surrounding brackets
+const AT = String.raw`(?:@|[[({]\s*(?:at|arroba)\s*[)\]}]|\b(?:at|arroba)\b)`;
+const DOT = String.raw`(?:\.|[[({]\s*(?:dot|punto)\s*[)\]}]|\b(?:dot|punto)\b)`;
+const OBFUSCATED_EMAIL_RE = new RegExp(
+  String.raw`([a-z0-9._%+-]{2,})\s*${AT}\s*([a-z0-9.-]{2,})\s*${DOT}\s*([a-z]{2,})(?:\s*${DOT}\s*([a-z]{2,}))?`,
+  'gi',
+);
+
+function deobfuscateEmails(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(OBFUSCATED_EMAIL_RE)) {
+    // skip normal emails (already caught by EMAIL_RE) — only keep spaced/bracketed forms
+    if (/^\S+@\S+\.\S+$/.test(m[0].replace(/\s+/g, '')) && !/\[|\(|\barroba\b|\bpunto\b|\bdot\b|\bat\b/i.test(m[0])) {
+      if (!/\s/.test(m[0])) continue;
+    }
+    const email = `${m[1]}@${m[2]}.${m[3]}${m[4] ? `.${m[4]}` : ''}`.toLowerCase();
+    if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z.]{2,}$/.test(email)) out.push(email);
+  }
+  return out;
+}
 const TEL_RE = /href=["']tel:([+0-9()\s.\-]{7,20})["']/gi;
 const WHATSAPP_RE = /https?:\/\/(?:wa\.me\/[0-9+]+|(?:api\.)?whatsapp\.com\/send[^"'\s<>]*)/gi;
 const VISIBLE_PHONE_RE = /(?:\+\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?)?\d{2,4}[\s.-]\d{3,4}[\s.-]?\d{3,4}\b/g;
@@ -65,12 +89,13 @@ export function harvestContacts(pages: CrawledPage[], defaultRegion = 'MX'): Evi
     const sourceType = pageSourceType(page);
     const base = { sourceUrl: page.finalUrl, sourceTitle: page.title, pageUrl: page.finalUrl, sourceType } as const;
 
-    // emails: mailto first (strongest), then raw text
+    // emails: mailto first (strongest), then raw text, then de-obfuscated forms
     const emailCandidates = new Set<string>();
     for (const match of page.html.matchAll(MAILTO_RE)) emailCandidates.add(match[1]!.toLowerCase());
     for (const match of `${page.text}\n${page.html}`.matchAll(EMAIL_RE)) {
       emailCandidates.add(match[0].toLowerCase());
     }
+    for (const email of deobfuscateEmails(page.text)) emailCandidates.add(email);
     for (const email of emailCandidates) {
       if (JUNK_EMAIL_RE.test(email) || seenEmails.has(email)) continue;
       if (/^no-?reply@/.test(email)) continue;
@@ -93,7 +118,7 @@ export function harvestContacts(pages: CrawledPage[], defaultRegion = 'MX'): Evi
     // phones: tel: links (strong) + visible text patterns (validated)
     const phoneCandidates: Array<{ raw: string; strong: boolean }> = [];
     for (const match of page.html.matchAll(TEL_RE)) phoneCandidates.push({ raw: match[1]!, strong: true });
-    if (page.kind === 'contact' || page.kind === 'home' || page.kind === 'legal') {
+    if (['contact', 'home', 'legal', 'about', 'team'].includes(page.kind)) {
       for (const match of page.text.matchAll(VISIBLE_PHONE_RE)) {
         phoneCandidates.push({ raw: match[0], strong: false });
       }

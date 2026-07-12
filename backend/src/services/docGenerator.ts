@@ -302,7 +302,25 @@ function buildReportPdf(report: EvidenceAwareReport, evidence: MergedEvidence[] 
     pdf.paragraph(NOT_AVAILABLE);
   }
 
-  const lowConfidence = report.low_confidence_evidence ?? [];
+  // Pattern-inferred contact candidates — clearly separated from confirmed
+  // contacts and explicitly labelled UNVERIFIED so they are never mistaken
+  // for real, source-backed emails.
+  const inferred = evidence.filter((item) => item.metadata?.inferred === true);
+  if (inferred.length > 0) {
+    pdf.heading('Inferred Contact Candidates (UNVERIFIED — verify before use)');
+    pdf.paragraph(
+      'These addresses were generated from the domain’s observed email format and named people. They are educated guesses, NOT confirmed contacts.',
+    );
+    for (const item of inferred) {
+      const forWhom = typeof item.metadata?.forPerson === 'string' ? item.metadata.forPerson : '';
+      pdf.bullet(item.value, { meta: `(inferred${forWhom ? ` for ${forWhom}` : ''}; pattern ${item.metadata?.pattern ?? ''})` });
+    }
+  }
+
+  const lowConfidence = (report.low_confidence_evidence ?? []).filter(
+    // inferred emails have their own section above
+    (item) => !(item.field === 'email' && inferred.some((i) => i.value === item.value)),
+  );
   if (lowConfidence.length > 0) {
     pdf.heading('Found but Unverified');
     for (const item of lowConfidence.slice(0, 30)) {

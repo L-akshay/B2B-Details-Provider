@@ -19,6 +19,7 @@ import { discoverPublicFiles } from './research/public-file-discovery';
 import { queryWayback } from './research/wayback-adapter';
 import { querySecEdgar } from './research/sec-edgar-adapter';
 import { queryOpenAlex } from './research/openalex-adapter';
+import { inferEmailCandidates } from './research/email-pattern-inference';
 import { harvestContacts } from './research/contact-harvester';
 import { resolveOfficialDomain } from './research/domain-resolver';
 import { dedupeEvidence } from './research/evidence-deduper';
@@ -410,7 +411,18 @@ export async function runResearchJob(
     const droppedPeople = rawEvidence.length - anchoredEvidence.length;
     if (droppedPeople > 0) console.log('[research] dropped off-company people', droppedPeople);
 
-    const normalized = normalizeEvidence(anchoredEvidence);
+    // Deterministic email-pattern inference (no API): learn the domain's
+    // personal-email format from a REAL personal email and generate candidate
+    // addresses for named people. Flagged inferred/unverified; surfaces under
+    // "Found but Unverified" only.
+    const inferredEmails = inferEmailCandidates(
+      domainResolution.selectedDomain ?? undefined,
+      anchoredEvidence.filter((e) => e.field === 'email'),
+      anchoredEvidence.filter((e) => e.field === 'key_person').map((e) => e.value),
+    );
+    if (inferredEmails.length > 0) console.log('[research] inferred email candidates', inferredEmails.length);
+
+    const normalized = normalizeEvidence([...anchoredEvidence, ...inferredEmails]);
     const scored = scoreEvidence(normalized);
     console.log('[research] evidence after scoring', scored.length);
     const deduped = dedupeEvidence(scored);
